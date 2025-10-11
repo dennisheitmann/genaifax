@@ -61,21 +61,22 @@ def convert_pdf_to_tiff(input_pdf: Path, output_tif: Path) -> bool:
 def send_fax(phone_number: str, tiff_file: Path) -> bool:
     """Sends the TIFF file as a fax using efax."""
     print(f"📠 Sending fax to {phone_number} from device {FAX_DEVICE}...")
-    
+    PHONE_NUMBER_PATTERN = re.compile(r"^[+]?\d+$")
+    if not PHONE_NUMBER_PATTERN.match(phone_number):
+        print(f"❌ Extracted fax-back number '{phone_number}' failed security validation. Skipping.")
+        print("=" * 80)
+        return
     command = [
         "efax", "-d", FAX_DEVICE, "-t", phone_number, str(tiff_file)
     ]
-    
     try:
         result = subprocess.run(command, check=True, capture_output=True, text=True, timeout=600) 
-        
         if "done" in result.stdout.lower() or "ok" in result.stdout.lower():
             print(f"✅ Fax sent successfully to {phone_number}.")
             return True
         else:
             print(f"⚠️ Efax completed, but status is uncertain. Check logs.")
-            return False
-            
+            return False     
     except subprocess.CalledProcessError as e:
         print(f"❌ Fax failed (Efax error): {e.stderr}")
         return False
@@ -175,20 +176,21 @@ def process_pdf_file(filepath: Path):
     filename = filepath.name
     print("\n" + "=" * 80)
     print(f"📦 New Fax File Detected: {filename}")
-
     match = FILENAME_PATTERN.search(filename)
-    
     if not match:
         print(f"❌ Filename does not match the required pattern. Skipping.")
         PROCESSED_FILES.add(filepath) # Add to set to avoid reprocessing
         print("=" * 80)
         return
-        
     datetime_str = match.group(1).replace('_', ' ')
     number = match.group(2) # The number to fax back to
-
+    PHONE_NUMBER_PATTERN = re.compile(r"^[+]?\d+$")
+    if not PHONE_NUMBER_PATTERN.match(number):
+        print(f"❌ Extracted fax-back number '{number}' failed security validation. Skipping.")
+        PROCESSED_FILES.add(filepath) 
+        print("=" * 80)
+        return
     print(f"✅ Extracted Datetime: {datetime_str} | Fax-Back Number: {number}")
-    
     # --- 1. Define the Prompt for OpenAI ---
     system_prompt = (
         "You are an expert fax processor. Analyze the provided fax document. "
@@ -197,46 +199,36 @@ def process_pdf_file(filepath: Path):
         "If there is a task (prompt) in the document, then also perform the task separately. "
     )
     prompt = f"{system_prompt}\n\nThis fax was received from number {number} at {datetime_str}."
-
     # --- 2. Send to OpenAI for Analysis ---
     analysis_content = analyze_pdf_with_openai(filepath, prompt)
-    
     # --- 3. Save the Result as PDF ---
     base_filename = filename.replace('.pdf', '')
     timestamp = time.strftime('%Y%m%d%H%M%S')
-    
     result_pdf_filename = f"ANALYSIS_{base_filename}_{timestamp}.pdf"
     result_pdf_filepath = OUTPUT_DIRECTORY / result_pdf_filename
-
     if not create_result_pdf(result_pdf_filepath, filename, analysis_content):
         print("⚠️ Skipping fax-back due to failure in creating result PDF.")
         PROCESSED_FILES.add(filepath)
         print("=" * 80)
         return
-
     # --- 4. Convert Result PDF to TIFF ---
     result_tif_filename = f"FAXBACK_{base_filename}_{timestamp}.tif"
     result_tif_filepath = OUTPUT_DIRECTORY / result_tif_filename
-    
     if not convert_pdf_to_tiff(result_pdf_filepath, result_tif_filepath):
         print("⚠️ Skipping fax-back due to failure in TIFF conversion.")
         PROCESSED_FILES.add(filepath)
         print("=" * 80)
         return
-
     # --- 5. Send the Fax Back ---
     send_fax(number, result_tif_filepath)
-    
     # --- 6. Cleanup & Mark as Processed ---
     try:
         os.remove(result_tif_filepath)
         print(f"🧹 Cleaned up temporary TIFF file: {result_tif_filepath.name}")
     except OSError as e:
         print(f"Warning: Failed to remove temporary TIFF file: {e}")
-    
     # IMPORTANT: Mark the original file as processed so it's ignored on the next poll
     PROCESSED_FILES.add(filepath)
-    
     print("=" * 80)
 
 def start_polling():
@@ -247,10 +239,8 @@ def start_polling():
     # to prevent immediate processing of old files.
     for p in WATCH_DIRECTORY.glob("*.pdf"):
         PROCESSED_FILES.add(p)
-    
     print(f"✅ Initial scan complete. {len(PROCESSED_FILES)} existing PDFs found and marked as processed.")
     print("Waiting for new PDF files...")
-
     try:
         while True:
             # 2. Scan for new files
@@ -258,10 +248,8 @@ def start_polling():
                 if filepath not in PROCESSED_FILES:
                     # A new, unprocessed file has been found
                     process_pdf_file(filepath)
-            
             # 3. Wait for the next poll
             time.sleep(POLLING_INTERVAL_SECONDS)
-
     except KeyboardInterrupt:
         print("\nWatcher stopped by user.")
     except Exception as e:
