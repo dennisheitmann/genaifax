@@ -18,6 +18,9 @@ OUTPUT_DIRECTORY = WATCH_DIRECTORY / "processed" # Directory for result PDFs and
 FAX_DEVICE = "/dev/rfcomm0" # Your configured fax device for efax
 POLLING_INTERVAL_SECONDS = 5 # How often to check the directory (e.g., every 5 seconds)
 
+# Regex to check if phone number is correct (optional + and numbers)
+PHONE_NUMBER_PATTERN = re.compile(r"^[+]?\d+$")
+
 # Regex to match the filename pattern and capture groups
 FILENAME_PATTERN = re.compile(
     r"(\d{2}\.\d{2}\.\d{2}_\d{2}\.\d{2})_Telefax\.(\d+)\.pdf$",
@@ -61,7 +64,6 @@ def convert_pdf_to_tiff(input_pdf: Path, output_tif: Path) -> bool:
 def send_fax(phone_number: str, tiff_file: Path) -> bool:
     """Sends the TIFF file as a fax using efax."""
     print(f"📠 Sending fax to {phone_number} from device {FAX_DEVICE}...")
-    PHONE_NUMBER_PATTERN = re.compile(r"^[+]?\d+$")
     if not PHONE_NUMBER_PATTERN.match(phone_number):
         print(f"❌ Extracted fax-back number '{phone_number}' failed security validation. Skipping.")
         print("=" * 80)
@@ -184,7 +186,6 @@ def process_pdf_file(filepath: Path):
         return
     datetime_str = match.group(1).replace('_', ' ')
     number = match.group(2) # The number to fax back to
-    PHONE_NUMBER_PATTERN = re.compile(r"^[+]?\d+$")
     if not PHONE_NUMBER_PATTERN.match(number):
         print(f"❌ Extracted fax-back number '{number}' failed security validation. Skipping.")
         PROCESSED_FILES.add(filepath) 
