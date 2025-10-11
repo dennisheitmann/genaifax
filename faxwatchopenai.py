@@ -21,6 +21,9 @@ POLLING_INTERVAL_SECONDS = 5 # How often to check the directory (e.g., every 5 s
 # Regex to check if phone number is correct (optional + and numbers)
 PHONE_NUMBER_PATTERN = re.compile(r"^[+]?\d+$")
 
+# Define a safe pattern for base filenames (alphanumeric, underscore, hyphen, and period are safe).
+SAFE_FILENAME_PATTERN = re.compile(r"^[a-zA-Z0-9_\-\.]+$")
+
 # Regex to match the filename pattern and capture groups
 FILENAME_PATTERN = re.compile(
     r"(\d{2}\.\d{2}\.\d{2}_\d{2}\.\d{2})_Telefax\.(\d+)\.pdf$",
@@ -204,6 +207,11 @@ def process_pdf_file(filepath: Path):
     analysis_content = analyze_pdf_with_openai(filepath, prompt)
     # --- 3. Save the Result as PDF ---
     base_filename = filename.replace('.pdf', '')
+    if not SAFE_FILENAME_PATTERN.match(base_filename):
+        print(f"❌ Sanitization failed for base filename: {base_filename}. Skipping fax-back.")
+        PROCESSED_FILES.add(filepath) # Ensure original file is marked as processed
+        print("=" * 80)
+        return
     timestamp = time.strftime('%Y%m%d%H%M%S')
     result_pdf_filename = f"ANALYSIS_{base_filename}_{timestamp}.pdf"
     result_pdf_filepath = OUTPUT_DIRECTORY / result_pdf_filename
