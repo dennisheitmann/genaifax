@@ -141,7 +141,6 @@ def analyze_pdf_with_openai(filepath: Path, prompt: str) -> str:
         uploaded_file = client.files.create(file=open(filepath, "rb"), purpose='user_data')
         file_id = uploaded_file.id
         print(f"   -> File uploaded successfully. File ID: {file_id}")
-
         response = client.responses.create(
             model="gpt-4o",
             input=[
@@ -157,11 +156,9 @@ def analyze_pdf_with_openai(filepath: Path, prompt: str) -> str:
         analysis_result = response.output_text
         print(f"   -> Analysis complete.")
         return analysis_result
-
     except Exception as e:
         print(f"🔴 OpenAI API Error during processing: {e}")
         return f"Error processing file with OpenAI: {e}"
-
     finally:
         if file_id:
             try:
