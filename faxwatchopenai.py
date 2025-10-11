@@ -196,6 +196,9 @@ def process_pdf_file(filepath: Path):
         "Identify the sender, recipient, subject, and a concise summary of the content. "
         "Format your entire output as a detailed, easy-to-read, plain text report for the sender. "
         "If there is a task (prompt) in the document, then also perform the task separately. "
+        "Correctness and quality is more important than the speed of answering. "
+        "Detect the language that the user is using. Make sure to use the same language in your response. "
+        "Do not mention the language explicitly. "
     )
     prompt = f"{system_prompt}\n\nThis fax was received from number {number} at {datetime_str}."
     # --- 2. Send to OpenAI for Analysis ---
