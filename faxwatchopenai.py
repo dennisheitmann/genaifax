@@ -45,14 +45,12 @@ print(f"⏰ Polling interval: {POLLING_INTERVAL_SECONDS} seconds")
 def convert_pdf_to_tiff(input_pdf: Path, output_tif: Path) -> bool:
     """Converts a PDF to a G3 TIFF file using Ghostscript (gs) for fax compatibility."""
     print(f"📄 Converting PDF to G3 TIFF for faxing...")
-    
     command = [
         "gs", "-q", "-sDEVICE=tiffg3", "-r204x196", "-dBATCH",
         "-dPDFFitPage", "-dNOPAUSE", 
         f"-sOutputFile={str(output_tif)}",
         str(input_pdf)
     ]
-    
     try:
         subprocess.run(command, check=True, capture_output=True, text=True)
         print(f"✅ TIFF conversion successful: {output_tif.name}")
