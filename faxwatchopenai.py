@@ -34,7 +34,7 @@ print(f"📁 Results in: {OUTPUT_DIRECTORY}")
 print(f"⏰ Polling interval: {POLLING_INTERVAL_SECONDS} seconds")
 # ---------------------
 
-# --- Fax Processing Functions (Unchanged from previous version) ---
+# --- Fax Processing Functions ---
 
 def convert_pdf_to_tiff(input_pdf: Path, output_tif: Path) -> bool:
     """Converts a PDF to a G3 TIFF file using Ghostscript (gs) for fax compatibility."""
@@ -86,6 +86,8 @@ def send_fax(phone_number: str, tiff_file: Path) -> bool:
         print("❌ Fax attempt timed out (600 seconds). Check modem connection.")
         return False
 
+# --- PDF Creation Function ---
+
 def create_result_pdf(output_path: Path, title: str, content: str):
     """
     Creates a new PDF file (A4, Monospace font) containing the analysis result.
@@ -124,6 +126,8 @@ def create_result_pdf(output_path: Path, title: str, content: str):
     except Exception as e:
         print(f"Error creating result PDF: {e}")
         return False
+
+# --- OpenAI Function ---
 
 def analyze_pdf_with_openai(filepath: Path, prompt: str) -> str:
     """Uploads the PDF to OpenAI, runs an analysis using gpt-4o, and returns the response."""
@@ -234,7 +238,6 @@ def process_pdf_file(filepath: Path):
     PROCESSED_FILES.add(filepath)
     
     print("=" * 80)
-
 
 def start_polling():
     """
