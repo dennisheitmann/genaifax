@@ -113,19 +113,26 @@ def create_result_pdf(output_path: Path, title: str, content: str):
             leading=14,
             spaceAfter=10,
         )
+        # Define a Helvetica Style (standard PDF font)
+        helvetica_style = ParagraphStyle(
+            name='Helvetica',
+            parent=styles['Normal'],
+            fontName='Helvetica',
+            fontSize=12,
+            leading=14,
+            spaceAfter=10,
+        )
         # Title and Metadata
         story.append(Paragraph(f"<b>OpenAI Fax Analysis Result</b>", styles['Title']))
-        story.append(Paragraph(f"Document: {title}", styles['Normal']))
-        story.append(Paragraph("<br/>", styles['Normal']))
+        story.append(Paragraph(f"Document: {title}", helvetica_style))
+        story.append(Paragraph("<br/>", helvetica_style))
         # Content
-        # Analysis content uses the Monospace style
-        story.append(Paragraph(f"<b>Analysis:</b>", styles['Normal']))
-        # We use a single Paragraph with the Monospace style for the content block.
+        story.append(Paragraph(f"<b>Analysis:</b>", helvetica_style))
         # Note: We replace newlines with line breaks (<br/>) for ReportLab
         formatted_content = content.replace('\n', '<br/>')
         story.append(Paragraph(formatted_content, monospace_style))
         doc.build(story)
-        print(f"💾 Analysis saved to PDF (A4, Monospace): {output_path.name}")
+        print(f"💾 Analysis saved to PDF (A4): {output_path.name}")
         return True
     except Exception as e:
         print(f"Error creating result PDF: {e}")
@@ -195,6 +202,8 @@ def process_pdf_file(filepath: Path):
         "You are an expert fax processor. Analyze the provided fax document. "
         "Identify the sender, recipient, subject, and a concise summary of the content. "
         "Format your entire output as a detailed, easy-to-read, plain text report for the sender. "
+        "If needed use HTML tags: <b> - Bold text, <i> - Italic text, <mark> - Marked text, <small> - Smaller text, "
+        "<del> - Deleted text, <ins> - Inserted text, <sub> - Subscript text, <sup> - Superscript text"
         "If there is a task (prompt) in the document, then also perform the task separately. "
         "Correctness and quality is more important than the speed of answering. "
         "Detect the language that the user is using. Make sure to use the same language in your response. "
