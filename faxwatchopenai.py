@@ -123,7 +123,7 @@ def create_result_pdf(output_path: Path, title: str, content: str):
             spaceAfter=10,
         )
         # Title and Metadata
-        story.append(Paragraph(f"<b>OpenAI Fax Analysis Result</b>", styles['Title']))
+        story.append(Paragraph(f"<b>AI Fax Analysis Result</b>", styles['Title']))
         story.append(Paragraph(f"Document: {title}", helvetica_style))
         story.append(Paragraph("<br/>", helvetica_style))
         # Content
