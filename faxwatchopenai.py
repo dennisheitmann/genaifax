@@ -128,8 +128,8 @@ def create_result_pdf(output_path: Path, title: str, content: str):
         story.append(Paragraph("<br/>", helvetica_style))
         # Content
         story.append(Paragraph(f"<b>Analysis:</b>", helvetica_style))
-        # Note: We replace newlines with line breaks (<br/>) for ReportLab
-        formatted_content = content.replace('\n', '<br/>')
+        # Note: We replace newlines with line breaks (<br />) for ReportLab
+        formatted_content = content.replace('\n', '<br />')
         story.append(Paragraph(formatted_content, monospace_style))
         doc.build(story)
         print(f"💾 Analysis saved to PDF (A4): {output_path.name}")
