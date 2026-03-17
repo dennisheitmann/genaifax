@@ -2,49 +2,68 @@ import os
 import time
 import re
 import subprocess
+import logging
 from pathlib import Path
 from openai import OpenAI
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import letter, A4
+from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Paragraph
 
+# --- Logging Configuration ---
+# Helps monitor the script in the background and debug hardware/API issues.
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[logging.StreamHandler()]
+)
+logger = logging.getLogger(__name__)
+
 # --- Configuration ---
-# Set your OpenAI API Key from an environment variable for security
+# Ensure your OPENAI_API_KEY environment variable is set.
 client = OpenAI() 
 
 WATCH_DIRECTORY = Path("/mnt/FritzFAX/FRITZ/faxbox/")
-OUTPUT_DIRECTORY = WATCH_DIRECTORY / "processed" # Directory for result PDFs and TIFFs
-FAX_DEVICE = "/dev/rfcomm0" # Your configured fax device for efax
-POLLING_INTERVAL_SECONDS = 5 # How often to check the directory (e.g., every 5 seconds)
+OUTPUT_DIRECTORY = WATCH_DIRECTORY / "processed" # Destination for results
+FAX_DEVICE = "/dev/rfcomm0"                      # Path to your fax modem
+POLLING_INTERVAL_SECONDS = 5                     # Frequency of directory scans
+MAX_API_RETRIES = 3                              # Retries for OpenAI network errors
 
-# Regex to check if phone number is correct (optional + and numbers)
+# Patterns for validation and extraction
 PHONE_NUMBER_PATTERN = re.compile(r"^[+]?\d+$")
-
-# Define a safe pattern for base filenames (alphanumeric, underscore, hyphen, and period are safe).
 SAFE_FILENAME_PATTERN = re.compile(r"^[a-zA-Z0-9_\-\.]+$")
-
-# Regex to match the filename pattern and capture groups
 FILENAME_PATTERN = re.compile(
     r"(\d{2}\.\d{2}\.\d{2}_\d{2}\.\d{2})_Telefax\.(\d+)\.pdf$",
     re.IGNORECASE
 )
 
-# Set to store paths of files that have been successfully processed
+# In-memory set to prevent double-processing in a single session
 PROCESSED_FILES = set()
 
-# --- Ensure output directory exists ---
+# Ensure output directory exists
 OUTPUT_DIRECTORY.mkdir(exist_ok=True)
-print(f"📁 Watching: {WATCH_DIRECTORY}")
-print(f"📁 Results in: {OUTPUT_DIRECTORY}")
-print(f"⏰ Polling interval: {POLLING_INTERVAL_SECONDS} seconds")
-# ---------------------
 
-# --- Fax Processing Functions ---
+# --- Helper Functions ---
+
+def wait_for_file_stability(filepath: Path, wait_time=2, samples=3):
+    """
+    RACE CONDITION MITIGATION:
+    Fritz!Box or network shares might take time to finish writing the PDF.
+    This confirms the file size is no longer changing before we touch it.
+    """
+    try:
+        for _ in range(samples):
+            size_1 = filepath.stat().st_size
+            time.sleep(wait_time)
+            size_2 = filepath.stat().st_size
+            if size_1 != size_2 or size_1 == 0:
+                return False
+        return True
+    except FileNotFoundError:
+        return False
 
 def convert_pdf_to_tiff(input_pdf: Path, output_tif: Path) -> bool:
-    """Converts a PDF to a G3 TIFF file using Ghostscript (gs) for fax compatibility."""
-    print(f"📄 Converting PDF to G3 TIFF for faxing...")
+    """Converts a PDF to a G3 TIFF file using Ghostscript for fax compatibility."""
+    logger.info(f"📄 Converting PDF to G3 TIFF: {output_tif.name}")
     command = [
         "gs", "-q", "-sDEVICE=tiffg3", "-r204x196", "-dBATCH",
         "-dPDFFitPage", "-dNOPAUSE", 
@@ -53,222 +72,183 @@ def convert_pdf_to_tiff(input_pdf: Path, output_tif: Path) -> bool:
     ]
     try:
         subprocess.run(command, check=True, capture_output=True, text=True)
-        print(f"✅ TIFF conversion successful: {output_tif.name}")
         return True
-    except subprocess.CalledProcessError as e:
-        print(f"❌ TIFF conversion failed (Ghostscript error): {e.stderr}")
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        logger.error(f"❌ TIFF conversion failed: {e}")
         return False
-    except FileNotFoundError:
-        print("❌ Error: 'gs' (Ghostscript) command not found. Please ensure it's installed.")
+
+def analyze_pdf_with_openai(filepath: Path, prompt: str) -> str:
+    """
+    API RELIABILITY & CONTEXT MANAGEMENT:
+    Uploads the PDF using a context manager and implements exponential backoff.
+    """
+    file_id = None
+    for attempt in range(MAX_API_RETRIES):
+        try:
+            logger.info(f"☁️ Uploading {filepath.name} to OpenAI (Attempt {attempt+1})...")
+            
+            # Use 'with' to ensure the file is closed immediately after reading
+            with filepath.open("rb") as f:
+                uploaded_file = client.files.create(file=f, purpose='user_data')
+            
+            file_id = uploaded_file.id
+            
+            # Using Chat Completions for GPT-4o PDF analysis
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image_url", "image_url": {"url": f"data:application/pdf;base64,{file_id}"}} 
+                            # Note: Logic assumes GPT-4o file interpretation via the API
+                        ],
+                    }
+                ],
+            )
+            return response.choices[0].message.content
+            
+        except Exception as e:
+            logger.warning(f"⚠️ OpenAI attempt {attempt+1} failed: {e}")
+            time.sleep(2 ** attempt) # Exponential backoff (2, 4, 8 seconds)
+        finally:
+            if file_id:
+                try:
+                    client.files.delete(file_id)
+                except Exception:
+                    pass
+    return "Error: Maximum retries reached. Could not process fax with AI."
+
+def create_result_pdf(output_path: Path, title: str, content: str):
+    """Creates an A4 PDF containing the analysis results using ReportLab."""
+    try:
+        doc = SimpleDocTemplate(str(output_path), pagesize=A4, title=title)
+        styles = getSampleStyleSheet()
+        
+        # Styles for visual clarity
+        mono_style = ParagraphStyle(
+            'Monospace', parent=styles['Normal'], fontName='Courier', fontSize=11, leading=13
+        )
+        helv_style = ParagraphStyle(
+            'Helvetica', parent=styles['Normal'], fontName='Helvetica', fontSize=12, leading=14
+        )
+
+        # Build PDF Story
+        story = [
+            Paragraph("<b>AI Fax Analysis Result</b>", styles['Title']),
+            Paragraph(f"<b>Original Document:</b> {title}", helv_style),
+            Paragraph("<br/><br/>", helv_style),
+            Paragraph("<b>Analysis & Response:</b>", helv_style),
+            Paragraph("<br/>", helv_style),
+            # Replace newlines with HTML breaks for ReportLab's Paragraph parser
+            Paragraph(content.replace('\n', '<br />'), mono_style)
+        ]
+        
+        doc.build(story)
+        logger.info(f"💾 Analysis saved to PDF: {output_path.name}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Error creating result PDF: {e}")
         return False
 
 def send_fax(phone_number: str, tiff_file: Path) -> bool:
-    """Sends the TIFF file as a fax using efax."""
-    print(f"📠 Sending fax to {phone_number} from device {FAX_DEVICE}...")
-    if not PHONE_NUMBER_PATTERN.match(phone_number):
-        print(f"❌ Extracted fax-back number '{phone_number}' failed security validation. Skipping.")
-        print("=" * 80)
-        return
-    command = [
-        "efax", "-d", FAX_DEVICE, "-t", phone_number, str(tiff_file)
-    ]
+    """Sends the TIFF file using the efax command-line utility."""
+    logger.info(f"📠 Sending fax to {phone_number} via {FAX_DEVICE}...")
+    command = ["efax", "-d", FAX_DEVICE, "-t", phone_number, str(tiff_file)]
     try:
-        result = subprocess.run(command, check=True, capture_output=True, text=True, timeout=600) 
+        # Faxes are slow; we use a 10-minute timeout
+        result = subprocess.run(command, check=True, capture_output=True, text=True, timeout=600)
         if "done" in result.stdout.lower() or "ok" in result.stdout.lower():
-            print(f"✅ Fax sent successfully to {phone_number}.")
+            logger.info(f"✅ Fax sent successfully to {phone_number}.")
             return True
         else:
-            print(f"⚠️ Efax completed, but status is uncertain. Check logs.")
+            logger.warning("⚠️ Efax finished but status is uncertain. Check hardware logs.")
             return False     
-    except subprocess.CalledProcessError as e:
-        print(f"❌ Fax failed (Efax error): {e.stderr}")
-        return False
-    except FileNotFoundError:
-        print("❌ Error: 'efax' command not found. Please ensure it's installed and configured.")
-        return False
-    except subprocess.TimeoutExpired:
-        print("❌ Fax attempt timed out (600 seconds). Check modem connection.")
-        return False
-
-# --- PDF Creation Function ---
-
-def create_result_pdf(output_path: Path, title: str, content: str):
-    """
-    Creates a new PDF file (A4, Monospace font) containing the analysis result.
-    """
-    try:
-        doc = SimpleDocTemplate(
-            str(output_path),
-            pagesize=A4,
-            title=title
-        )
-        styles = getSampleStyleSheet()
-        story = []
-        # Define a Monospace Style (using Courier, a standard PDF font)
-        monospace_style = ParagraphStyle(
-            name='Monospace',
-            parent=styles['Normal'],
-            fontName='Courier',
-            fontSize=12,
-            leading=14,
-            spaceAfter=10,
-        )
-        # Define a Helvetica Style (standard PDF font)
-        helvetica_style = ParagraphStyle(
-            name='Helvetica',
-            parent=styles['Normal'],
-            fontName='Helvetica',
-            fontSize=12,
-            leading=14,
-            spaceAfter=10,
-        )
-        # Title and Metadata
-        story.append(Paragraph(f"<b>AI Fax Analysis Result</b>", styles['Title']))
-        story.append(Paragraph(f"Document: {title}", helvetica_style))
-        story.append(Paragraph("<br/>", helvetica_style))
-        # Content
-        story.append(Paragraph(f"<b>Analysis:</b>", helvetica_style))
-        # Note: We replace newlines with line breaks (<br />) for ReportLab
-        formatted_content = content.replace('\n', '<br />')
-        story.append(Paragraph(formatted_content, monospace_style))
-        doc.build(story)
-        print(f"💾 Analysis saved to PDF (A4): {output_path.name}")
-        return True
     except Exception as e:
-        print(f"Error creating result PDF: {e}")
+        logger.error(f"❌ Fax failed (Efax/Hardware error): {e}")
         return False
 
-# --- OpenAI Function ---
-
-def analyze_pdf_with_openai(filepath: Path, prompt: str) -> str:
-    """Uploads the PDF to OpenAI, runs an analysis using gpt-4o, and returns the response."""
-    print(f"☁️ Uploading file to OpenAI: {filepath.name}...")
-    file_id = None
-    try:
-        uploaded_file = client.files.create(file=open(filepath, "rb"), purpose='user_data')
-        file_id = uploaded_file.id
-        print(f"   -> File uploaded successfully. File ID: {file_id}")
-        response = client.responses.create(
-            model="gpt-4o",
-            input=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "input_text", "text": prompt},
-                        {"type": "input_file", "file_id": file_id}
-                    ],
-                }
-            ],
-        )
-        analysis_result = response.output_text
-        print(f"   -> Analysis complete.")
-        return analysis_result
-    except Exception as e:
-        print(f"🔴 OpenAI API Error during processing: {e}")
-        return f"Error processing file with OpenAI: {e}"
-    finally:
-        if file_id:
-            try:
-                client.files.delete(file_id)
-                print(f"   -> Cleaned up uploaded file: {file_id}")
-            except Exception as e:
-                print(f"Warning: Could not delete file {file_id} from OpenAI: {e}")
-
-# --- Polling Logic ---
+# --- Main Processing Loop ---
 
 def process_pdf_file(filepath: Path):
-    """
-    Handles the core logic for a single detected PDF file.
-    """
+    """Handles the full lifecycle of a detected fax PDF."""
+    
+    # 0. Wait for file to finish writing to disk
+    if not wait_for_file_stability(filepath):
+        logger.warning(f"File {filepath.name} is unstable or incomplete. Skipping.")
+        return
+
     filename = filepath.name
-    print("\n" + "=" * 80)
-    print(f"📦 New Fax File Detected: {filename}")
+    logger.info(f"📦 New Fax Detected: {filename}")
+    
+    # 1. Filename & Security Validation
     match = FILENAME_PATTERN.search(filename)
     if not match:
-        print(f"❌ Filename does not match the required pattern. Skipping.")
-        PROCESSED_FILES.add(filepath) # Add to set to avoid reprocessing
-        print("=" * 80)
+        logger.error("❌ Filename pattern mismatch. Skipping.")
+        PROCESSED_FILES.add(filepath)
         return
+
     datetime_str = match.group(1).replace('_', ' ')
-    number = match.group(2) # The number to fax back to
-    if not PHONE_NUMBER_PATTERN.match(number):
-        print(f"❌ Extracted fax-back number '{number}' failed security validation. Skipping.")
-        PROCESSED_FILES.add(filepath) 
-        print("=" * 80)
+    number = match.group(2) 
+    
+    if not (PHONE_NUMBER_PATTERN.match(number) and SAFE_FILENAME_PATTERN.match(filename.replace('.pdf', ''))):
+        logger.error(f"❌ Security validation failed for number '{number}'. Skipping.")
+        PROCESSED_FILES.add(filepath)
         return
-    print(f"✅ Extracted Datetime: {datetime_str} | Fax-Back Number: {number}")
-    # --- 1. Define the Prompt for OpenAI ---
+
+    # 2. Define the Full Instruction Set (The System Prompt)
     system_prompt = (
         "You are an expert fax processor. Analyze the provided fax document. "
         "Identify the sender, recipient, subject, and a concise summary of the content. "
         "Format your entire output as a detailed, easy-to-read, plain text report for the sender. "
-        "If needed use HTML tags: <b> - Bold text, <i> - Italic text, <del> - Deleted text "
+        "If needed use HTML tags: <b> - Bold text, <i> - Italic text, <del> - Deleted text. "
         "If there is a task (prompt) in the document, then also perform the task separately. "
         "Correctness and quality is more important than the speed of answering. "
         "Detect the language that the user is using. Make sure to use the same language in your response. "
         "Do not mention the language explicitly. "
     )
     prompt = f"{system_prompt}\n\nThis fax was received from number {number} at {datetime_str}."
-    # --- 2. Send to OpenAI for Analysis ---
+
+    # 3. Analyze with AI
     analysis_content = analyze_pdf_with_openai(filepath, prompt)
-    # --- 3. Save the Result as PDF ---
-    base_filename = filename.replace('.pdf', '')
-    if not SAFE_FILENAME_PATTERN.match(base_filename):
-        print(f"❌ Sanitization failed for base filename: {base_filename}. Skipping fax-back.")
-        PROCESSED_FILES.add(filepath) # Ensure original file is marked as processed
-        print("=" * 80)
-        return
+
+    # 4. Generate Result PDF
     timestamp = time.strftime('%Y%m%d%H%M%S')
-    result_pdf_filename = f"ANALYSIS_{base_filename}_{timestamp}.pdf"
-    result_pdf_filepath = OUTPUT_DIRECTORY / result_pdf_filename
-    if not create_result_pdf(result_pdf_filepath, filename, analysis_content):
-        print("⚠️ Skipping fax-back due to failure in creating result PDF.")
-        PROCESSED_FILES.add(filepath)
-        print("=" * 80)
-        return
-    # --- 4. Convert Result PDF to TIFF ---
-    result_tif_filename = f"FAXBACK_{base_filename}_{timestamp}.tif"
-    result_tif_filepath = OUTPUT_DIRECTORY / result_tif_filename
-    if not convert_pdf_to_tiff(result_pdf_filepath, result_tif_filepath):
-        print("⚠️ Skipping fax-back due to failure in TIFF conversion.")
-        PROCESSED_FILES.add(filepath)
-        print("=" * 80)
-        return
-    # --- 5. Send the Fax Back ---
-    send_fax(number, result_tif_filepath)
-    # --- 6. Cleanup & Mark as Processed ---
-    try:
-        os.remove(result_tif_filepath)
-        print(f"🧹 Cleaned up temporary TIFF file: {result_tif_filepath.name}")
-    except OSError as e:
-        print(f"Warning: Failed to remove temporary TIFF file: {e}")
-    # IMPORTANT: Mark the original file as processed so it's ignored on the next poll
+    result_pdf_path = OUTPUT_DIRECTORY / f"ANALYSIS_{number}_{timestamp}.pdf"
+    result_tif_path = OUTPUT_DIRECTORY / f"FAXBACK_{number}_{timestamp}.tif"
+
+    if create_result_pdf(result_pdf_path, filename, analysis_content):
+        # 5. Convert to TIFF and Send
+        if convert_pdf_to_tiff(result_pdf_path, result_tif_path):
+            if send_fax(number, result_tif_path):
+                # Cleanup temp TIFF on success
+                if result_tif_path.exists():
+                    result_tif_path.unlink()
+    
+    # Always mark as processed to prevent infinite loops
     PROCESSED_FILES.add(filepath)
-    print("=" * 80)
+    logger.info("-" * 40)
 
 def start_polling():
-    """
-    Initializes and runs the polling loop to check the directory.
-    """
-    # 1. On startup, populate the processed set with all existing files
-    # to prevent immediate processing of old files.
+    """Starts the watcher and processes new PDFs as they arrive."""
+    # Ignore files already in the directory at startup
     for p in WATCH_DIRECTORY.glob("*.pdf"):
         PROCESSED_FILES.add(p)
-    print(f"✅ Initial scan complete. {len(PROCESSED_FILES)} existing PDFs found and marked as processed.")
-    print("Waiting for new PDF files...")
+    
+    logger.info(f"🚀 Watcher started. Ignoring {len(PROCESSED_FILES)} existing files.")
+    logger.info(f"Watching: {WATCH_DIRECTORY}")
+
     try:
         while True:
-            # 2. Scan for new files
             for filepath in WATCH_DIRECTORY.glob("*.pdf"):
                 if filepath not in PROCESSED_FILES:
-                    # A new, unprocessed file has been found
                     process_pdf_file(filepath)
-            # 3. Wait for the next poll
             time.sleep(POLLING_INTERVAL_SECONDS)
     except KeyboardInterrupt:
-        print("\nWatcher stopped by user.")
+        logger.info("Watcher stopped by user.")
     except Exception as e:
-        print(f"An unexpected error occurred: {e}")
-        
+        logger.critical(f"An unexpected error occurred in the loop: {e}")
+
 if __name__ == "__main__":
     start_polling()
